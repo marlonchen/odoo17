@@ -61,6 +61,7 @@ class StockRule(models.Model):
                     ('picking_type_id', '=', rule.picking_type_id.id),
                     ('company_id', '=', procurement.company_id.id),
                     ('user_id', '=', False),
+                    ('location_dest_id', 'child_of', procurement.location_id.id)
                 )
                 if procurement.values.get('orderpoint_id'):
                     procurement_date = datetime.combine(
@@ -118,12 +119,17 @@ class StockRule(models.Model):
             warehouse_id = rule.warehouse_id
             if not warehouse_id:
                 warehouse_id = rule.location_dest_id.warehouse_id
-            if rule.picking_type_id == warehouse_id.sam_type_id:
+            manu_rule = rule.route_id.rule_ids.filtered(lambda r: r.action == 'manufacture' and r.warehouse_id == warehouse_id)
+            if warehouse_id.manufacture_steps != 'pbm_sam' or not manu_rule:
+                continue
+            if rule.picking_type_id == warehouse_id.sam_type_id or (
+                warehouse_id.sam_loc_id and warehouse_id.sam_loc_id.parent_path in rule.location_src_id.parent_path
+            ):
                 if float_compare(procurement.product_qty, 0, precision_rounding=procurement.product_uom.rounding) < 0:
                     procurement.values['group_id'] = procurement.values['group_id'].stock_move_ids.filtered(
                         lambda m: m.state not in ['done', 'cancel']).move_orig_ids.group_id[:1]
                     continue
-                manu_type_id = warehouse_id.manu_type_id
+                manu_type_id = manu_rule[0].picking_type_id
                 if manu_type_id:
                     name = manu_type_id.sequence_id.next_by_id()
                 else:
@@ -213,7 +219,7 @@ class StockRule(models.Model):
             for wh in warehouse:
                 if wh.manufacture_steps != 'mrp_one_step':
                     wh_manufacture_rules = product._get_rules_from_location(product.property_stock_production, route_ids=wh.pbm_route_id)
-                    extra_delays, extra_delay_description = (wh_manufacture_rules - self)._get_lead_days(product, **values)
+                    extra_delays, extra_delay_description = (wh_manufacture_rules - self).with_context(ignore_global_visibility_days=True)._get_lead_days(product, **values)
                     for key, value in extra_delays.items():
                         delays[key] += value
                     delay_description += extra_delay_description

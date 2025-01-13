@@ -1206,7 +1206,7 @@ const UnitUserValueWidget = UserValueWidget.extend({
         const activeValue = this._super(...arguments);
 
         const params = this._methodsParams;
-        if (!params.unit) {
+        if (!this._isNumeric()) {
             return activeValue;
         }
 
@@ -1230,7 +1230,7 @@ const UnitUserValueWidget = UserValueWidget.extend({
         const defaultValue = this._super(...arguments);
 
         const params = this._methodsParams;
-        if (!params.unit) {
+        if (!this._isNumeric()) {
             return defaultValue;
         }
 
@@ -1246,18 +1246,21 @@ const UnitUserValueWidget = UserValueWidget.extend({
      */
     isActive: function () {
         const isSuperActive = this._super(...arguments);
-        const params = this._methodsParams;
-        if (!params.unit) {
+        if (!this._isNumeric()) {
             return isSuperActive;
         }
-        return isSuperActive && this._floatToStr(parseFloat(this._value)) !== '0';
+        return isSuperActive && (
+            this._floatToStr(parseFloat(this._value)) !== '0'
+            // Or is a composite value.
+            || !!this._value.match(/\d+\s+\d+/)
+        );
     },
     /**
      * @override
      */
     async setValue(value, methodName) {
         const params = this._methodsParams;
-        if (params.unit) {
+        if (this._isNumeric()) {
             value = value.split(' ').map(v => {
                 const numValue = weUtils.convertValueToUnit(v, params.unit, params.cssProperty, this.$target);
                 if (isNaN(numValue)) {
@@ -1283,6 +1286,16 @@ const UnitUserValueWidget = UserValueWidget.extend({
     _floatToStr: function (value) {
         return `${parseFloat(value.toFixed(5))}`;
     },
+    /**
+     * Checks whether the widget contains a numeric value.
+     *
+     * @private
+     * @returns {Boolean} true if the value is numeric, false otherwise.
+     */
+    _isNumeric() {
+        const params = this._methodsParams || this.el.dataset;
+        return !!params.unit;
+    },
 });
 
 const InputUserValueWidget = UnitUserValueWidget.extend({
@@ -1301,12 +1314,11 @@ const InputUserValueWidget = UnitUserValueWidget.extend({
         await this._super(...arguments);
 
         const unit = this.el.dataset.unit;
-        const step = this.el.dataset.step;
         this.inputEl = document.createElement('input');
         this.inputEl.setAttribute('type', 'text');
         this.inputEl.setAttribute('autocomplete', 'chrome-off');
         this.inputEl.setAttribute('placeholder', this.el.getAttribute('placeholder') || '');
-        const useNumberAlignment = !!step || !!unit || !!this.el.dataset.fakeUnit || !!this.el.dataset.hideUnit;
+        const useNumberAlignment = this._isNumeric() || !!this.el.dataset.hideUnit;
         this.inputEl.classList.toggle('text-start', !useNumberAlignment);
         this.inputEl.classList.toggle('text-end', useNumberAlignment);
         this.containerEl.appendChild(this.inputEl);
@@ -1345,6 +1357,14 @@ const InputUserValueWidget = UnitUserValueWidget.extend({
      */
     _getFocusableElement() {
         return this.inputEl;
+    },
+    /**
+     * @override
+     */
+    _isNumeric() {
+        const isNumeric = this._super(...arguments);
+        const params = this._methodsParams || this.el.dataset;
+        return isNumeric || !!params.fakeUnit || !!params.step;
     },
 
     //--------------------------------------------------------------------------
@@ -1419,7 +1439,7 @@ const InputUserValueWidget = UnitUserValueWidget.extend({
      */
     _onInputKeydown: function (ev) {
         const params = this._methodsParams;
-        if (!params.unit && !params.step) {
+        if (!this._isNumeric()) {
             return;
         }
         switch (ev.key) {
@@ -1429,34 +1449,48 @@ const InputUserValueWidget = UnitUserValueWidget.extend({
             case "ArrowUp":
             case "ArrowDown": {
                 const input = ev.currentTarget;
-                let value = parseFloat(input.value || input.placeholder);
-                if (isNaN(value)) {
-                    value = 0.0;
+                let parts = (input.value || input.placeholder).match(/-?\d+\.\d+|-?\d+/g);
+                if (!parts) {
+                    parts = [input.value || input.placeholder];
                 }
-                let step = parseFloat(params.step);
-                if (isNaN(step)) {
-                    step = 1.0;
+                if (parts.length > 1 && !('min' in params)) {
+                    // No negative for composite values.
+                    params['min'] = 0;
                 }
+                const newValue = parts.map(part => {
+                    let value = parseFloat(part);
+                    if (isNaN(value)) {
+                        value = 0.0;
+                    }
+                    let step = parseFloat(params.step);
+                    if (isNaN(step)) {
+                        step = 1.0;
+                    }
 
-                const increasing = ev.key === "ArrowUp";
-                const hasMin = ('min' in params);
-                const hasMax = ('max' in params);
+                    const increasing = ev.key === "ArrowUp";
+                    const hasMin = ('min' in params);
+                    const hasMax = ('max' in params);
 
-                // If value already at min and trying to decrease, do nothing
-                if (!increasing && hasMin && Math.abs(value - params.min) < 0.001) {
+                    // If value already at min and trying to decrease, do nothing
+                    if (!increasing && hasMin && Math.abs(value - params.min) < 0.001) {
+                        return value;
+                    }
+                    // If value already at max and trying to increase, do nothing
+                    if (increasing && hasMax && Math.abs(value - params.max) < 0.001) {
+                        return value;
+                    }
+
+                    // If trying to decrease/increase near min/max, we still need to
+                    // bound the produced value and immediately show the user.
+                    value += (increasing ? step : -step);
+                    value = hasMin ? Math.max(params.min, value) : value;
+                    value = hasMax ? Math.min(value, params.max) : value;
+                    return this._floatToStr(value);
+                }).join(" ");
+                if (newValue === (input.value || input.placeholder)) {
                     return;
                 }
-                // If value already at max and trying to increase, do nothing
-                if (increasing && hasMax && Math.abs(value - params.max) < 0.001) {
-                    return;
-                }
-
-                // If trying to decrease/increase near min/max, we still need to
-                // bound the produced value and immediately show the user.
-                value += (increasing ? step : -step);
-                value = hasMin ? Math.max(params.min, value) : value;
-                value = hasMax ? Math.min(value, params.max) : value;
-                input.value = this._floatToStr(value);
+                input.value = newValue;
 
                 // We need to know if the change event will be triggered or not.
                 // Change is triggered if there has been a "natural" input event
@@ -1760,7 +1794,7 @@ const ColorpickerUserValueWidget = SelectUserValueWidget.extend({
             options.excluded = this.options.dataAttributes.excluded.replace(/ /g, '').split(',');
         }
         if (this.options.dataAttributes.opacity) {
-            options.opacity = this.options.dataAttributes.opacity;
+            options.opacity = parseFloat(this.options.dataAttributes.opacity);
         }
         if (this.options.dataAttributes.withCombinations) {
             options.withCombinations = !!this.options.dataAttributes.withCombinations;
@@ -1923,8 +1957,8 @@ const MediapickerUserValueWidget = UserValueWidget.extend({
             noIcons: true,
             noDocuments: true,
             isForBgVideo: true,
-            vimeoPreviewIds: ['299225971', '414790269', '420192073', '368484050', '334729960', '417478345',
-                '312451183', '415226028', '367762632', '340475898', '374265101', '370467553'],
+            vimeoPreviewIds: ['528686125', '430330731', '509869821', '397142251', '763851966', '486931161',
+                '499761556', '392935303', '728584384', '865314310', '511727912', '466830211'],
             'res_model': $editable.data('oe-model'),
             'res_id': $editable.data('oe-id'),
             save,
@@ -2115,6 +2149,7 @@ const ListUserValueWidget = UserValueWidget.extend({
         'click we-button.o_we_checkbox_wrapper': '_onAddItemCheckboxClick',
         'input table input': '_onListItemBlurInput',
         'blur table input': '_onListItemBlurInput',
+        'mousedown': '_onWeListMousedown',
     },
 
     /**
@@ -2342,22 +2377,21 @@ const ListUserValueWidget = UserValueWidget.extend({
      * @param {Boolean} [preview]
      */
     _notifyCurrentState(preview = false) {
+        const isIdModeName = this.el.dataset.idMode === "name" || !this.isCustom;
+        const trimmed = (str) => str.trim().replace(/\s+/g, " ");
         const values = [...this.listTable.querySelectorAll('.o_we_list_record_name input')].map(el => {
-            let id = this.isCustom ? el.value : el.name;
-            if (this.el.dataset.idMode && this.el.dataset.idMode === "name") {
-                id = el.name;
-            }
+            const id = trimmed(isIdModeName ? el.name : el.value);
             return Object.assign({
                 id: /^-?[0-9]{1,15}$/.test(id) ? parseInt(id) : id,
-                name: el.value,
-                display_name: el.value,
+                name: trimmed(el.value),
+                display_name: trimmed(el.value),
             }, el.dataset);
         });
         if (this.hasDefault) {
             const checkboxes = [...this.listTable.querySelectorAll('we-button.o_we_checkbox_wrapper.active')];
             this.selected = checkboxes.map(el => {
                 const input = el.parentElement.previousSibling.firstChild;
-                const id = input.name || input.value;
+                const id = trimmed(isIdModeName ? input.name : input.value);
                 return /^-?[0-9]{1,15}$/.test(id) ? parseInt(id) : id;
             });
             values.forEach(v => {
@@ -2461,8 +2495,24 @@ const ListUserValueWidget = UserValueWidget.extend({
             // from one input to another in the list. This behavior can be
             // cancelled if the widget has reloadOnInputBlur = "true" in its
             // dataset.
-            this._notifyCurrentState(preview);
+            const timeSinceMousedown = ev.timeStamp - this.mousedownTime;
+            if (timeSinceMousedown < 500) {
+                // Without this "setTimeOut", "click" events are not triggered when
+                // clicking directly on a "we-button" of the "we-list" without first
+                // focusing out the input.
+                setTimeout(() => {
+                    this._notifyCurrentState(preview);
+                }, 500);
+            } else {
+                this._notifyCurrentState(preview);
+            }
         }
+    },
+    /**
+     * @private
+     */
+    _onWeListMousedown(ev) {
+        this.mousedownTime = ev.timeStamp;
     },
     /**
      * @private
@@ -3620,10 +3670,14 @@ const SnippetOptionWidget = Widget.extend({
         }
 
         let hasUserValue = false;
-        for (let i = cssProps.length - 1; i > 0; i--) {
-            hasUserValue = applyCSS.call(this, cssProps[i], values.pop(), styles) || hasUserValue;
+        const applyAllCSS = (values) => {
+            for (let i = cssProps.length - 1; i > 0; i--) {
+                hasUserValue = applyCSS.call(this, cssProps[i], values.pop(), styles) || hasUserValue;
+            }
+            hasUserValue = applyCSS.call(this, cssProps[0], values.join(' '), styles) || hasUserValue;
         }
-        hasUserValue = applyCSS.call(this, cssProps[0], values.join(' '), styles) || hasUserValue;
+
+        applyAllCSS([...values]);
 
         function applyCSS(cssProp, cssValue, styles) {
             if (typeof params.forceStyle !== 'undefined') {
@@ -3631,35 +3685,13 @@ const SnippetOptionWidget = Widget.extend({
                 return true;
             }
 
-            // This condition requires extraClass to NOT be set.
             if (!weUtils.areCssValuesEqual(styles.getPropertyValue(cssProp), cssValue, cssProp, this.$target[0])) {
-                // Property must be set => extraClass will be enabled.
-                if (params.extraClass) {
-                    // The extraClass is temporarily removed during selectStyle
-                    // because it is enabled only if the element style is set
-                    // by the option. (E.g. add the bootstrap border class only
-                    // if there is a border width.) Unfortunately the
-                    // extraClass might specify default !important properties,
-                    // therefore determining whether !important is needed
-                    // requires the class to be applied.
-                    this.$target[0].classList.add(params.extraClass);
-                    // Set inline style only if different from value defined
-                    // with extraClass.
-                    if (!weUtils.areCssValuesEqual(styles.getPropertyValue(cssProp), cssValue, cssProp, this.$target[0])) {
-                        this.$target[0].style.setProperty(cssProp, cssValue);
-                    }
-                } else {
-                    // Inline style required.
-                    this.$target[0].style.setProperty(cssProp, cssValue);
-                }
+                this.$target[0].style.setProperty(cssProp, cssValue);
                 // If change had no effect then make it important.
                 // This condition requires extraClass to be set.
                 if (!params.preventImportant && !weUtils.areCssValuesEqual(
                         styles.getPropertyValue(cssProp), cssValue, cssProp, this.$target[0])) {
                     this.$target[0].style.setProperty(cssProp, cssValue, 'important');
-                }
-                if (params.extraClass) {
-                    this.$target[0].classList.remove(params.extraClass);
                 }
                 return true;
             }
@@ -3668,6 +3700,13 @@ const SnippetOptionWidget = Widget.extend({
 
         if (params.extraClass) {
             this.$target.toggleClass(params.extraClass, hasUserValue);
+            if (hasUserValue) {
+                // Might have changed because of the class.
+                for (const cssProp of cssProps) {
+                    this.$target[0].style.removeProperty(cssProp);
+                }
+                applyAllCSS(values);
+            }
         }
 
         _restoreTransitions();
@@ -4060,6 +4099,11 @@ const SnippetOptionWidget = Widget.extend({
                         }
                     }
                 }
+                // When the default color is the target's "currentColor", the
+                // value should be handled correctly by the option.
+                if (value === "currentColor") {
+                    return styles.color;
+                }
 
                 return value;
             }
@@ -4433,8 +4477,10 @@ const SnippetOptionWidget = Widget.extend({
                 return;
             }
 
+            this.__willReload = requiresReload;
             // Call widget option methods and update $target
             await this._select(previewMode, widget);
+            this.__willReload = false;
 
             // If it is not preview mode, the user selected the option for good
             // (so record the action)
@@ -4636,8 +4682,8 @@ registry.sizing = SnippetOptionWidget.extend({
             self.options.wysiwyg.odooEditor.automaticStepUnactive('resizing');
 
             const cursor = $handle.css('cursor') + '-important';
-            const $body = $(this.ownerDocument.body);
-            $body.addClass(cursor);
+            const $iframeWindow = $(this.ownerDocument.defaultView);
+            $iframeWindow[0].document.body.classList.add(cursor);
             self.$overlay.removeClass('o_handlers_idle');
 
             const bodyMouseMove = function (ev) {
@@ -4683,9 +4729,9 @@ registry.sizing = SnippetOptionWidget.extend({
                 }
             };
             const bodyMouseUp = function () {
-                $body.off('mousemove', bodyMouseMove);
-                $body.off('mouseup', bodyMouseUp);
-                $body.removeClass(cursor);
+                $iframeWindow.off("mousemove", bodyMouseMove);
+                $iframeWindow.off("mouseup", bodyMouseUp);
+                $iframeWindow[0].document.body.classList.remove(cursor);
                 self.$overlay.addClass('o_handlers_idle');
                 $handle.removeClass('o_active');
 
@@ -4724,8 +4770,8 @@ registry.sizing = SnippetOptionWidget.extend({
                     }});
                 }, 0);
             };
-            $body.on('mousemove', bodyMouseMove);
-            $body.on('mouseup', bodyMouseUp);
+            $iframeWindow.on("mousemove", bodyMouseMove);
+            $iframeWindow.on("mouseup", bodyMouseUp);
         });
 
         for (const [key, value] of Object.entries(resizeValues)) {
@@ -5385,6 +5431,16 @@ registry.layout_column = SnippetOptionWidget.extend(ColumnLayoutMixin, {
         // Add the new column and update the grid height.
         rowEl.appendChild(newColumnEl);
         gridUtils._resizeGrid(rowEl);
+
+        // Scroll to the new column if more than half of it is hidden (= out of
+        // the viewport or hidden by an other element).
+        const newColumnPosition = newColumnEl.getBoundingClientRect();
+        const middleX = (newColumnPosition.left + newColumnPosition.right) / 2;
+        const middleY = (newColumnPosition.top + newColumnPosition.bottom) / 2;
+        const sameCoordinatesEl = this.ownerDocument.elementFromPoint(middleX, middleY);
+        if (!sameCoordinatesEl || !newColumnEl.contains(sameCoordinatesEl)) {
+            newColumnEl.scrollIntoView({behavior: "smooth", block: "center"});
+        }
         this.trigger_up('activate_snippet', {$snippet: $(newColumnEl)});
     },
     /**
@@ -5921,6 +5977,11 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
         this._deactivateLinkTool = this._deactivateLinkTool.bind(this);
     },
 
+    destroy: function () {
+        this._clearListeners();
+        return this._super(...arguments);
+    },
+
     /**
      * @override
      */
@@ -5935,8 +5996,7 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
      * @override
      */
     onBlur() {
-        this.options.wysiwyg.odooEditor.removeEventListener('activate_image_link_tool', this._activateLinkTool);
-        this.options.wysiwyg.odooEditor.removeEventListener('deactivate_image_link_tool', this._deactivateLinkTool);
+        this._clearListeners();
     },
 
     //--------------------------------------------------------------------------
@@ -5959,7 +6019,7 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
      * @see this.selectClass for parameters
      */
     setLink(previewMode, widgetValue, params) {
-        const parentEl = this.$target[0].parentNode;
+        const parentEl = this._searchSupportedParentLinkEl();
         if (parentEl.tagName !== 'A') {
             const wrapperEl = document.createElement('a');
             this.$target[0].after(wrapperEl);
@@ -5984,7 +6044,7 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
      * @see this.selectClass for parameters
      */
     setNewWindow(previewMode, widgetValue, params) {
-        const linkEl = this.$target[0].parentElement;
+        const linkEl = this._searchSupportedParentLinkEl();
         if (widgetValue) {
             linkEl.setAttribute('target', '_blank');
         } else {
@@ -5997,7 +6057,7 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
      * @see this.selectClass for parameters
      */
     setUrl(previewMode, widgetValue, params) {
-        const linkEl = this.$target[0].parentElement;
+        const linkEl = this._searchSupportedParentLinkEl();
         let url = widgetValue;
         if (!url) {
             // As long as there is no URL, the image is not considered a link.
@@ -6035,7 +6095,8 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
      * @private
      */
     _activateLinkTool() {
-        if (this.$target[0].parentElement.tagName === 'A') {
+        const parentEl = this._searchSupportedParentLinkEl();
+        if (parentEl.tagName === 'A') {
             this._requestUserValueWidgets('media_url_opt')[0].focus();
         } else {
             this._requestUserValueWidgets('media_link_opt')[0].enable();
@@ -6044,8 +6105,15 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
     /**
      * @private
      */
+    _clearListeners() {
+        this.options.wysiwyg.odooEditor.removeEventListener('activate_image_link_tool', this._activateLinkTool);
+        this.options.wysiwyg.odooEditor.removeEventListener('deactivate_image_link_tool', this._deactivateLinkTool);
+    },
+    /**
+     * @private
+     */
     _deactivateLinkTool() {
-        const parentEl = this.$target[0].parentNode;
+        const parentEl = this._searchSupportedParentLinkEl();
         if (parentEl.tagName === 'A') {
             this._requestUserValueWidgets('media_link_opt')[0].enable();
         }
@@ -6054,7 +6122,7 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
      * @override
      */
     _computeWidgetState(methodName, params) {
-        const parentEl = this.$target[0].parentElement;
+        const parentEl = this._searchSupportedParentLinkEl();
         const linkEl = parentEl.tagName === 'A' ? parentEl : null;
         switch (methodName) {
             case 'setLink': {
@@ -6077,11 +6145,20 @@ registry.ReplaceMedia = SnippetOptionWidget.extend({
     async _computeWidgetVisibility(widgetName, params) {
         if (widgetName === 'media_link_opt') {
             if (this.$target[0].matches('img')) {
-                return isImageSupportedForStyle(this.$target[0]);
+                return isImageSupportedForStyle(this.$target[0])
+                    && !this._searchSupportedParentLinkEl().matches("a[data-oe-xpath]");
             }
             return !this.$target[0].classList.contains('media_iframe_video');
         }
         return this._super(...arguments);
+    },
+    /**
+     * @private
+     * @returns {Element} The "closest" element that can be supported as a <a>.
+     */
+    _searchSupportedParentLinkEl() {
+        const parentEl = this.$target[0].parentElement;
+        return parentEl.matches("figure") ? parentEl.parentElement : parentEl;
     },
 });
 
@@ -6336,6 +6413,8 @@ const ImageHandlerOption = SnippetOptionWidget.extend({
             img.classList.add('o_modified_image_to_save');
             const loadedImg = await loadImage(dataURL, img);
             this._applyImage(loadedImg);
+            // Also apply to carousel thumbnail if applicable.
+            weUtils.forwardToThumbnail(img);
             return loadedImg;
         }
         return img;
@@ -6518,7 +6597,6 @@ registry.ImageTools = ImageHandlerOption.extend({
      * @see this.selectClass for parameters
      */
     async crop() {
-        this.trigger_up('hide_overlay');
         this.trigger_up('disable_loading_effect');
         const img = this._getImg();
         const document = this.$el[0].ownerDocument;
@@ -6557,10 +6635,14 @@ registry.ImageTools = ImageHandlerOption.extend({
         const playState = this.$target[0].style.animationPlayState;
         const transition = this.$target[0].style.transition;
         this.$target.transfo({document});
+        const destroyTransfo = () => {
+            this.$target.transfo('destroy');
+            $(document).off('mousedown', mousedown);
+            window.document.removeEventListener('keydown', keydown);
+        }
         const mousedown = mousedownEvent => {
             if (!$(mousedownEvent.target).closest('.transfo-container').length) {
-                this.$target.transfo('destroy');
-                $(document).off('mousedown', mousedown);
+                destroyTransfo();
                 // Restore animation css properties potentially affected by the
                 // jQuery transfo plugin.
                 this.$target[0].style.animationPlayState = playState;
@@ -6568,6 +6650,13 @@ registry.ImageTools = ImageHandlerOption.extend({
             }
         };
         $(document).on('mousedown', mousedown);
+        const keydown = keydownEvent => {
+            if (keydownEvent.key === 'Escape') {
+                keydownEvent.stopImmediatePropagation();
+                destroyTransfo();
+            }
+        };
+        window.document.addEventListener('keydown', keydown);
 
         await new Promise(resolve => {
             document.addEventListener('mouseup', resolve, {once: true});
@@ -6620,8 +6709,8 @@ registry.ImageTools = ImageHandlerOption.extend({
             // When a shape is removed and there is a hover effect on the
             // image, we then place the "Square" shape as the default because a
             // shape is required for the hover effects to work.
-            const shapeImgShapeWidget = this._requestUserValueWidgets("shape_img_square_opt")[0];
-            widgetValue = shapeImgShapeWidget.getActiveValue("setImgShape");
+            const shapeImgSquareWidget = this._requestUserValueWidgets("shape_img_square_opt")[0];
+            widgetValue = shapeImgSquareWidget.getActiveValue("setImgShape");
         }
         if (widgetValue) {
             await this._loadShape(widgetValue);
@@ -6644,7 +6733,7 @@ registry.ImageTools = ImageHandlerOption.extend({
                         delete img.dataset.shapeFlip;
                         delete img.dataset.shapeRotate;
                     }
-                    if (params.animated || this._isDeviceShape()) {
+                    if (!this._canHaveHoverEffect()) {
                         delete img.dataset.hoverEffect;
                         delete img.dataset.hoverEffectColor;
                         delete img.dataset.hoverEffectStrokeWidth;
@@ -6665,6 +6754,8 @@ registry.ImageTools = ImageHandlerOption.extend({
                 img.dataset.mimetype = img.dataset.originalMimetype;
                 delete img.dataset.originalMimetype;
             }
+            // Also apply to carousel thumbnail if applicable.
+            weUtils.forwardToThumbnail(img);
         }
         img.classList.add('o_modified_image_to_save');
     },
@@ -6722,21 +6813,48 @@ registry.ImageTools = ImageHandlerOption.extend({
      */
     async setImgShapeHoverEffect(previewMode, widgetValue, params) {
         const imgEl = this._getImg();
+        if (previewMode !== "reset") {
+            this.prevHoverEffectColor = imgEl.dataset.hoverEffectColor;
+            this.prevHoverEffectIntensity = imgEl.dataset.hoverEffectIntensity;
+            this.prevHoverEffectStrokeWidth = imgEl.dataset.hoverEffectStrokeWidth;
+        }
         delete imgEl.dataset.hoverEffectColor;
         delete imgEl.dataset.hoverEffectIntensity;
         delete imgEl.dataset.hoverEffectStrokeWidth;
-        if (params.name === "hover_effect_overlay_opt") {
-            imgEl.dataset.hoverEffectColor = this._getCSSColorValue("black-25");
-        } else if (params.name === "hover_effect_outline_opt") {
-            imgEl.dataset.hoverEffectColor = this._getCSSColorValue("primary");
-            imgEl.dataset.hoverEffectStrokeWidth = 10;
+        if (previewMode === true) {
+            if (params.name === "hover_effect_overlay_opt") {
+                imgEl.dataset.hoverEffectColor = this._getCSSColorValue("black-25");
+            } else if (params.name === "hover_effect_outline_opt") {
+                imgEl.dataset.hoverEffectColor = this._getCSSColorValue("primary");
+                imgEl.dataset.hoverEffectStrokeWidth = 10;
+            } else {
+                imgEl.dataset.hoverEffectIntensity = 20;
+                if (params.name !== "hover_effect_mirror_blur_opt") {
+                    imgEl.dataset.hoverEffectColor = "rgba(0, 0, 0, 0)";
+                }
+            }
         } else {
-            imgEl.dataset.hoverEffectIntensity = 20;
-            if (params.name !== "hover_effect_mirror_blur_opt") {
-                imgEl.dataset.hoverEffectColor = "rgba(0, 0, 0, 0)";
+            if (this.prevHoverEffectColor) {
+                imgEl.dataset.hoverEffectColor = this.prevHoverEffectColor;
+            }
+            if (this.prevHoverEffectIntensity) {
+                imgEl.dataset.hoverEffectIntensity = this.prevHoverEffectIntensity;
+            }
+            if (this.prevHoverEffectStrokeWidth) {
+                imgEl.dataset.hoverEffectStrokeWidth = this.prevHoverEffectStrokeWidth;
             }
         }
-        await this._applyOptions();
+        await this._reapplyCurrentShape();
+        // TODO in master, adapt the '_reapplyCurrentShape()' method to add the
+        // 'o_modified_image_to_save' class on the image.
+        imgEl.classList.add("o_modified_image_to_save");
+        // When the hover effects are first activated from the "animationMode"
+        // function of the "WebsiteAnimate" class, the history was paused to
+        // avoid recording intermediate steps. That's why we unpause it here.
+        if (this.firstHoverEffect) {
+            this.options.wysiwyg.odooEditor.historyUnpauseSteps();
+            delete this.firstHoverEffect;
+        }
     },
     /**
      * @see this.selectClass for parameters
@@ -6744,7 +6862,8 @@ registry.ImageTools = ImageHandlerOption.extend({
     async selectDataAttribute(previewMode, widgetValue, params) {
         await this._super(...arguments);
         if (["hoverEffectIntensity", "hoverEffectStrokeWidth"].includes(params.attributeName)) {
-            await this._applyOptions();
+            await this._reapplyCurrentShape();
+            this._getImg().classList.add("o_modified_image_to_save");
         }
     },
     /**
@@ -6761,7 +6880,8 @@ registry.ImageTools = ImageHandlerOption.extend({
             defaultColor = "primary";
         }
         img.dataset.hoverEffectColor = this._getCSSColorValue(widgetValue || defaultColor);
-        await this._applyOptions();
+        img.classList.add("o_modified_image_to_save");
+        await this._reapplyCurrentShape();
     },
 
     //--------------------------------------------------------------------------
@@ -6774,10 +6894,6 @@ registry.ImageTools = ImageHandlerOption.extend({
     notify(name) {
         if (name === "enable_hover_effect") {
             this.trigger_up("snippet_edition_request", {exec: () => {
-                // Add the "Overlay" hover effect to the shape.
-                const hoverEffectOverlayWidget = this._requestUserValueWidgets("hover_effect_overlay_opt")[0];
-                hoverEffectOverlayWidget.enable();
-                hoverEffectOverlayWidget.getParent().close(); // FIXME remove this ugly hack asap
                 // Add the "square" shape to the image if it has no shape
                 // because the "hover effects" need a shape to work.
                 const imgEl = this._getImg();
@@ -6787,6 +6903,11 @@ registry.ImageTools = ImageHandlerOption.extend({
                     shapeImgSquareWidget.enable();
                     shapeImgSquareWidget.getParent().close(); // FIXME remove this ugly hack asap
                 }
+                // Add the "Overlay" hover effect to the shape.
+                this.firstHoverEffect = true;
+                const hoverEffectOverlayWidget = this._requestUserValueWidgets("hover_effect_overlay_opt")[0];
+                hoverEffectOverlayWidget.enable();
+                hoverEffectOverlayWidget.getParent().close(); // FIXME remove this ugly hack asap
             }});
         } else if (name === "disable_hover_effect") {
             this._disableHoverEffect();
@@ -6896,6 +7017,8 @@ registry.ImageTools = ImageHandlerOption.extend({
         if (save) {
             img.dataset.shapeColors = newColors.join(';');
         }
+        // Also apply to carousel thumbnail if applicable.
+        weUtils.forwardToThumbnail(img);
     },
     /**
      * Sets the image in the supplied SVG and replace the src with a dataURL
@@ -6906,8 +7029,54 @@ registry.ImageTools = ImageHandlerOption.extend({
      */
     async _writeShape(svgText) {
         const img = this._getImg();
-        const initialImageWidth = img.naturalWidth;
         let needToRefreshPublicWidgets = false;
+        let hasHoverEffect = false;
+
+        // Add shape animations on hover.
+        if (img.dataset.hoverEffect && this._canHaveHoverEffect()) {
+            // The "ImageShapeHoverEffet" public widget needs to restart
+            // (e.g. image replacement).
+            needToRefreshPublicWidgets = true;
+            hasHoverEffect = true;
+        }
+
+        const dataURL = await this.computeShape(svgText, img);
+
+        let clonedImgEl = null;
+        if (hasHoverEffect) {
+            // This is useful during hover effects previews. Without this, in
+            // Chrome, the 'mouse out' animation is triggered very briefly when
+            // previewMode === 'reset' (when transitioning from one hover effect
+            // to another), causing a visual glitch. To avoid this, we hide the
+            // image with its clone when the source is set.
+            clonedImgEl = img.cloneNode(true);
+            this.options.wysiwyg.odooEditor.observerUnactive("addClonedImgForHoverEffectPreview");
+            img.classList.add("d-none");
+            img.insertAdjacentElement("afterend", clonedImgEl);
+            this.options.wysiwyg.odooEditor.observerActive("addClonedImgForHoverEffectPreview");
+        }
+        const loadedImg = await loadImage(dataURL, img);
+        if (hasHoverEffect) {
+            this.options.wysiwyg.odooEditor.observerUnactive("removeClonedImgForHoverEffectPreview");
+            clonedImgEl.remove();
+            img.classList.remove("d-none");
+            this.options.wysiwyg.odooEditor.observerActive("removeClonedImgForHoverEffectPreview");
+        }
+        if (needToRefreshPublicWidgets) {
+            await this._refreshPublicWidgets();
+        }
+        return loadedImg;
+    },
+    /**
+     * Sets the image in the supplied SVG and replace the src with a dataURL
+     *
+     * @param {string} svgText svg text file
+     * @param img JQuery image
+     * @returns {Promise} resolved once the svg is properly loaded
+     * in the document
+     */
+    async computeShape(svgText, img) {
+        const initialImageWidth = img.naturalWidth;
 
         const svg = new DOMParser().parseFromString(svgText, 'image/svg+xml').documentElement;
 
@@ -6931,11 +7100,8 @@ registry.ImageTools = ImageHandlerOption.extend({
         }
 
         // Add shape animations on hover.
-        if (img.dataset.hoverEffect && !this._isDeviceShape() && !this._isAnimatedShape()) {
+        if (img.dataset.hoverEffect && this._canHaveHoverEffect()) {
             this._addImageShapeHoverEffect(svg, img);
-            // The "ImageShapeHoverEffet" public widget needs to restart
-            // (e.g. image replacement).
-            needToRefreshPublicWidgets = true;
         }
 
         const svgAspectRatio = parseInt(svg.getAttribute('width')) / parseInt(svg.getAttribute('height'));
@@ -6956,7 +7122,7 @@ registry.ImageTools = ImageHandlerOption.extend({
         // Force natural width & height (note: loading the original image is
         // needed for Safari where natural width & height of SVG does not return
         // the correct values).
-        const originalImage = await loadImage(imgDataURL, img);
+        const originalImage = await loadImage(imgDataURL);
         // If the svg forces the size of the shape we still want to have the resized
         // width
         if (!svg.dataset.forcedSize) {
@@ -6975,11 +7141,7 @@ registry.ImageTools = ImageHandlerOption.extend({
         const dataURL = await createDataURL(blob);
         const imgFilename = (img.dataset.originalSrc.split('/').pop()).split('.')[0];
         img.dataset.fileName = `${imgFilename}.svg`;
-        const loadedImg = await loadImage(dataURL, img);
-        if (needToRefreshPublicWidgets) {
-            this._refreshPublicWidgets();
-        }
-        return loadedImg;
+        return dataURL;
     },
     /**
      * @override
@@ -7065,12 +7227,11 @@ registry.ImageTools = ImageHandlerOption.extend({
         }
         if (params.optionsPossibleValues.setImgShapeHoverEffect) {
             const imgEl = this._getImg();
-            return imgEl.classList.contains("o_animate_on_hover") && !this._isDeviceShape() && !this._isAnimatedShape();
+            return imgEl.classList.contains("o_animate_on_hover") && this._canHaveHoverEffect();
         }
         // If "Description" or "Tooltip" options.
         if (["alt", "title"].includes(params.attributeName)) {
-            const imgEl = this._getImg();
-            return !imgEl.matches("[data-oe-type='image'] > img, [data-oe-xpath]");
+            return isImageSupportedForStyle(this._getImg());
         }
         // The "Square" shape is only used for hover effects. It is
         // automatically set when there is an hover effect and no shape is
@@ -7082,8 +7243,8 @@ registry.ImageTools = ImageHandlerOption.extend({
             // Do not show the "remove shape" button when the "square" shape is
             // enable. The "square" shape is only enable when there is a hover
             // effect and it is always hidden in the shape select.
-            const shapeImgShareWidget = this._requestUserValueWidgets("shape_img_square_opt")[0];
-            return !shapeImgShareWidget.isActive();
+            const shapeImgSquareWidget = this._requestUserValueWidgets("shape_img_square_opt")[0];
+            return !shapeImgSquareWidget.isActive();
         }
         return this._super(...arguments);
     },
@@ -7352,7 +7513,20 @@ registry.ImageTools = ImageHandlerOption.extend({
      */
     _isAnimatedShape() {
         const shapeImgWidget = this._requestUserValueWidgets("shape_img_opt")[0];
-        return shapeImgWidget && shapeImgWidget.getMethodsParams().animated;
+        return shapeImgWidget?.getMethodsParams().animated;
+    },
+    /**
+     * Checks if the shape can have a hover effect.
+     *
+     * @private
+     * @returns {boolean}
+     */
+    _canHaveHoverEffect() {
+        // TODO Remove this comment in master:
+        // Note that this method does not ensure that a shape can be applied,
+        // which is required for hover effects. It should be preferably merged
+        // with the `_isImageSupportedForShapes()` method.
+        return !this._isDeviceShape() && !this._isAnimatedShape();
     },
     /**
      * Adds hover effect to the SVG.
@@ -7466,7 +7640,7 @@ registry.ImageTools = ImageHandlerOption.extend({
                 const parser = new DOMParser();
                 const xmlDoc = parser.parseFromString(text, "text/xml");
                 return xmlDoc.getElementsByTagName("svg")[0];
-        });
+            });
     },
     /**
      * Disables the hover effect on the image.
@@ -7486,6 +7660,41 @@ registry.ImageTools = ImageHandlerOption.extend({
         if (shapeName === "geo_square") {
             this._requestUserValueWidgets("remove_img_shape_opt")[0].enable();
         }
+    },
+    /**
+     * @override
+     */
+    async _select(previewMode, widget) {
+        await this._super(...arguments);
+        // This is a special case where we need to override the "_select"
+        // function in order to trigger mouse events for hover effects on the
+        // images when previewing the options. This is done here because if it
+        // was done in one of the widget methods, the animation would be
+        // canceled when "_refreshPublicWidgets" is executed in the "_super"
+        if (widget.$el[0].closest("#o_hover_effects_options")) {
+            const hasSetImgShapeHoverEffectMethod = widget.getMethodsNames().includes("setImgShapeHoverEffect");
+            // We trigger the animation when preview mode is "false", except for
+            // the "setImgShapeHoverEffect" option, where we trigger it when
+            // preview mode is "true".
+            if (previewMode === hasSetImgShapeHoverEffectMethod) {
+                this.$target[0].dispatchEvent(new Event("mouseover"));
+                this.hoverTimeoutId = setTimeout(() => {
+                    this.$target[0].dispatchEvent(new Event("mouseout"));
+                }, 700);
+            } else if (previewMode === "reset") {
+                clearTimeout(this.hoverTimeoutId);
+            }
+        }
+    },
+    /**
+     * Checks if a shape can be applied on the target.
+     *
+     * @private
+     * @returns {boolean}
+     */
+    _isImageSupportedForShapes() {
+        const imgEl = this._getImg();
+        return imgEl.dataset.originalId && this._isImageSupportedForProcessing(imgEl);
     },
 
     //--------------------------------------------------------------------------
@@ -7890,10 +8099,15 @@ registry.BackgroundImage = SnippetOptionWidget.extend({
             this.$target.addClass('oe_img_bg o_bg_img_center');
         } else {
             delete parts.url;
-            this.$target.removeClass('oe_img_bg o_bg_img_center');
+            this.$target[0].classList.remove(
+                "oe_img_bg",
+                "o_bg_img_center",
+                "o_modified_image_to_save",
+            );
         }
         const combined = backgroundImagePartsToCss(parts);
         this.$target.css('background-image', combined);
+        this.options.wysiwyg.odooEditor.editable.focus();
     },
 });
 
@@ -9422,16 +9636,17 @@ registry.CarouselHandler = registry.GalleryHandler.extend({
             : this.$target[0].querySelector(".carousel");
         carouselEl.classList.remove("slide");
         $(carouselEl).carousel(position);
-        for (const indicatorEl of this.$target[0].querySelectorAll(".carousel-indicators li")) {
-            indicatorEl.classList.remove("active");
-        }
-        this.$target[0].querySelector(`.carousel-indicators li[data-bs-slide-to="${position}"]`)
-                    .classList.add("active");
+        const indicatorEls = this.$target[0].querySelectorAll(".carousel-indicators li");
+        indicatorEls.forEach((indicatorEl, i) => {
+            indicatorEl.classList.toggle("active", i === position);
+        });
         this.trigger_up("activate_snippet", {
             $snippet: $(this.$target[0].querySelector(".carousel-item.active img")),
             ifInactiveOptions: true,
         });
         carouselEl.classList.add("slide");
+        // Prevent the carousel from automatically sliding afterwards.
+        $(carouselEl).carousel("pause");
     },
 });
 
